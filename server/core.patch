@@ -1,0 +1,1622 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ae3d8be..4b19d97 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -205,7 +205,26 @@ if(POLICY CMP0167)
+ endif()
+ 
+ # Find needed packages and if necessery abort if something important is missing
++if(EMSCRIPTEN)
++  # Built for wasm beforehand and handed over: WEB_BOOST_INCLUDE (the header tree) and WEB_DEPS
++  # (include/ and lib/ with Boost's compiled parts, libcrypto and SQLite).
++  set(Boost_FOUND TRUE)
++  set(Boost_INCLUDE_DIRS "${WEB_BOOST_INCLUDE}")
++  set(Boost_LIBRARIES
++    "${WEB_DEPS}/lib/libboost_program_options.a"
++    "${WEB_DEPS}/lib/libboost_filesystem.a"
++    "${WEB_DEPS}/lib/libboost_thread.a"
++    "${WEB_DEPS}/lib/libboost_chrono.a"
++    "${WEB_DEPS}/lib/libboost_atomic.a"
++  )
++  set(OPENSSL_INCLUDE_DIR "${WEB_DEPS}/include")
++  set(OPENSSL_LIBRARIES "${WEB_DEPS}/lib/libcrypto.a")
++  set(SQLite3_FOUND TRUE)
++  set(SQLite3_INCLUDE_DIRS "${WEB_DEPS}/include")
++  set(SQLite3_LIBRARIES "${WEB_DEPS}/lib/libsqlite3.a")
++else()
+ find_package(Boost 1.70.0 REQUIRED COMPONENTS program_options thread regex serialization filesystem)
++endif()
+ 
+ if (APPLE)
+     find_package(ICU COMPONENTS uc i18n data REQUIRED)
+@@ -232,9 +251,23 @@ endif()
+ 
+ # Win32 delivered packages
+ if(WIN32 AND (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER OR BUILD_EXTRACTORS))
+-  set(MYSQL_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/dep/lib/include/mysql")
+-  set(MYSQL_LIBRARY "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_release/libmysql.lib")
+-  set(MYSQL_DEBUG_LIBRARY "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_debug/libmysql.lib")
++  if(SQLITE)
++    # SQLite on Windows
++    find_package(SQLite3 REQUIRED)
++  else()
++    set(MYSQL_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/dep/lib/include/mysql")
++    set(MYSQL_LIBRARY "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_release/libmysql.lib")
++    set(MYSQL_DEBUG_LIBRARY "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_debug/libmysql.lib")
++  endif()
++  if(MINGW)
++    # The delivered OpenSSL libraries are MSVC import libraries; MinGW links a static OpenSSL
++    # found through OPENSSL_ROOT_DIR instead (its legacy provider is built into libcrypto.a).
++    set(OPENSSL_USE_STATIC_LIBS TRUE)
++    find_package(OpenSSL REQUIRED)
++    # a static libcrypto needs the Windows certificate and socket libraries after it on the link line
++    list(APPEND OPENSSL_LIBRARIES crypt32 ws2_32)
++    message(STATUS "Found OpenSSL libraries: ${OPENSSL_LIBRARIES}")
++  else()
+   set(OPENSSL_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/dep/lib/include")
+   set(OPENSSL_LIBRARIES
+      "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_release/libcrypto.lib"
+@@ -246,10 +279,11 @@ if(WIN32 AND (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER OR BUILD_EXTRACTORS))
+      "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_debug/libssl.lib"
+      "${CMAKE_SOURCE_DIR}/dep/lib/${DEP_ARCH}_debug/legacy.lib"
+   )
++  endif()
+ endif()
+ 
+ # *nix-specific packages
+-if(UNIX AND (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER OR BUILD_EXTRACTORS))
++if(UNIX AND NOT EMSCRIPTEN AND (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER OR BUILD_EXTRACTORS))
+   if(POSTGRESQL)
+     find_package(PostgreSQL REQUIRED)
+   elseif(SQLITE)
+diff --git a/cmake/options.cmake b/cmake/options.cmake
+index d3392e4..c809292 100644
+--- a/cmake/options.cmake
++++ b/cmake/options.cmake
+@@ -1,6 +1,7 @@
+ option(DEBUG                                "Include additional debug-code in core"     OFF)
+ option(WARNINGS                             "Show all warnings during compile"          OFF)
+ option(POSTGRESQL                           "Use PostgreSQL"                            OFF)
++option(SQLITE                               "Use SQLite"                                OFF)
+ option(PCH                                  "Use precompiled headers"                   ON)
+ option(BUILD_GAME_SERVER                    "Build game server"                         ON)
+ option(BUILD_LOGIN_SERVER                   "Build login server"                        ON)
+diff --git a/dep/g3dlite/G3D/System.h b/dep/g3dlite/G3D/System.h
+index ad8a550..d0d7ef0 100644
+--- a/dep/g3dlite/G3D/System.h
++++ b/dep/g3dlite/G3D/System.h
+@@ -24,7 +24,7 @@
+ #   include <CoreServices/CoreServices.h>
+ #endif
+ 
+-#ifdef __FreeBSD__
++#if defined(__FreeBSD__) || defined(__EMSCRIPTEN__)
+ #   include <sys/time.h>
+ #endif
+ 
+diff --git a/dep/g3dlite/G3D/platform.h b/dep/g3dlite/G3D/platform.h
+index a17ef7a..8eb5d1a 100644
+--- a/dep/g3dlite/G3D/platform.h
++++ b/dep/g3dlite/G3D/platform.h
+@@ -54,7 +54,7 @@
+ #elif  defined(__FreeBSD__) || defined(__OpenBSD__)
+     #define G3D_FREEBSD
+     #define G3D_LINUX
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__EMSCRIPTEN__)
+     #define G3D_LINUX
+ #elif defined(__APPLE__)
+     #define G3D_OSX
+diff --git a/dep/g3dlite/System.cpp b/dep/g3dlite/System.cpp
+index e893c6e..5fa3752 100644
+--- a/dep/g3dlite/System.cpp
++++ b/dep/g3dlite/System.cpp
+@@ -1701,7 +1701,7 @@ void System::cpuid(CPUIDFunction func, uint32& eax, uint32& ebx, uint32& ecx, ui
+     edx = 0;
+ }
+ 
+-#elif defined(G3D_LINUX) && ( defined(__arm__) || defined(__aarch64__))
++#elif defined(G3D_LINUX) && ( defined(__arm__) || defined(__aarch64__) || defined(__EMSCRIPTEN__))
+ // non-x86 CPU; no CPUID, at least in userspace
+ void System::cpuid(CPUIDFunction func, uint32& eax, uint32& ebx, uint32& ecx, uint32& edx) {
+     eax = 0;
+diff --git a/dep/src/CMakeLists.txt b/dep/src/CMakeLists.txt
+index b103ddc..7b92df4 100644
+--- a/dep/src/CMakeLists.txt
++++ b/dep/src/CMakeLists.txt
+@@ -51,8 +51,10 @@ else()
+ endif()
+ 
+ if (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER)
++  if(NOT EMSCRIPTEN)
+   add_subdirectory(gsoap)
+ endif()
++endif()
+ 
+ if (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER OR BUILD_EXTRACTORS)
+   add_subdirectory(utf8cpp)
+diff --git a/src/game/Accounts/AccountMgr.cpp b/src/game/Accounts/AccountMgr.cpp
+index dae931d..5f3ec6b 100644
+--- a/src/game/Accounts/AccountMgr.cpp
++++ b/src/game/Accounts/AccountMgr.cpp
+@@ -55,7 +55,13 @@ AccountOpResult AccountMgr::CreateAccount(std::string username, std::string pass
+     const char* s_hex = srp.GetSalt().AsHexStr();
+     const char* v_hex = srp.GetVerifier().AsHexStr();
+ 
++    // In a browser tab a player signs in the moment the page has set their password: the write
++    // is done before this returns, not queued behind it.
++#ifdef __EMSCRIPTEN__
++    bool update_sv = LoginDatabase.DirectPExecute(
++#else
+     bool update_sv = LoginDatabase.PExecute(
++#endif
+         "INSERT INTO account(username,v,s,joindate) VALUES('%s','%s','%s'," _NOW_ ")",
+             username.c_str(), v_hex, s_hex);
+ 
+@@ -135,7 +141,13 @@ AccountOpResult AccountMgr::ChangeUsername(uint32 accid, std::string new_uname,
+     const char* s_hex = srp.GetSalt().AsHexStr();
+     const char* v_hex = srp.GetVerifier().AsHexStr();
+ 
++    // In a browser tab a player signs in the moment the page has set their password: the write
++    // is done before this returns, not queued behind it.
++#ifdef __EMSCRIPTEN__
++    bool update_sv = LoginDatabase.DirectPExecute(
++#else
+     bool update_sv = LoginDatabase.PExecute(
++#endif
+         "UPDATE account SET v='%s',s='%s',username='%s' WHERE id='%u'",
+             v_hex, s_hex, safe_new_uname.c_str(), accid);
+ 
+@@ -168,7 +180,13 @@ AccountOpResult AccountMgr::ChangePassword(uint32 accid, std::string new_passwd)
+     const char* s_hex = srp.GetSalt().AsHexStr();
+     const char* v_hex = srp.GetVerifier().AsHexStr();
+ 
++    // In a browser tab a player signs in the moment the page has set their password: the write
++    // is done before this returns, not queued behind it.
++#ifdef __EMSCRIPTEN__
++    bool update_sv = LoginDatabase.DirectPExecute(
++#else
+     bool update_sv = LoginDatabase.PExecute(
++#endif
+         "UPDATE account SET v='%s', s='%s' WHERE id='%u'",
+             v_hex, s_hex, accid);
+ 
+diff --git a/src/game/Globals/ObjectMgr.cpp b/src/game/Globals/ObjectMgr.cpp
+index 702b580..a767b01 100644
+--- a/src/game/Globals/ObjectMgr.cpp
++++ b/src/game/Globals/ObjectMgr.cpp
+@@ -2011,6 +2011,12 @@ void ObjectMgr::LoadCreatures()
+                 sLog.outErrorDb("Table `creature` have creature (GUID: %u Entry: %u) with spawn template %u that doesnt exist.", guid, data.id, spawnDataEntry);
+         }
+ 
++#ifdef __EMSCRIPTEN__
++        // Nothing reads this field, and finding it for every spawn loads the terrain and the
++        // collision data of both continents at startup: half of the time a world takes to start
++        // in a browser tab.
++        data.OriginalZoneId = 0;
++#else
+         if (mapEntry->IsContinent())
+         {
+             auto terrainInfo = sTerrainMgr.LoadTerrain(data.mapid);
+@@ -2018,6 +2024,7 @@ void ObjectMgr::LoadCreatures()
+         }
+         else
+             data.OriginalZoneId = 0;
++#endif
+ 
+         if (dynGuid && !data.gameEvent)
+         {
+@@ -2208,6 +2215,12 @@ void ObjectMgr::LoadGameObjects()
+             continue;
+         }
+ 
++#ifdef __EMSCRIPTEN__
++        // Nothing reads this field, and finding it for every spawn loads the terrain and the
++        // collision data of both continents at startup: half of the time a world takes to start
++        // in a browser tab.
++        data.OriginalZoneId = 0;
++#else
+         if (mapEntry->IsContinent())
+         {
+             auto terrainInfo = sTerrainMgr.LoadTerrain(data.mapid);
+@@ -2215,6 +2228,7 @@ void ObjectMgr::LoadGameObjects()
+         }
+         else
+             data.OriginalZoneId = 0;
++#endif
+ 
+         if (dynGuid && !data.gameEvent)
+         {
+diff --git a/src/game/Maps/Map.cpp b/src/game/Maps/Map.cpp
+index 75552ac..8296c24 100644
+--- a/src/game/Maps/Map.cpp
++++ b/src/game/Maps/Map.cpp
+@@ -697,7 +697,7 @@ void Map::Update(const uint32& t_diff)
+ 
+     m_curTime = time(nullptr);
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) || defined(__MINGW32__) // MinGW (msvcrt) has no localtime_r
+     localtime_s(&m_curTimeTm, &m_curTime);
+ #else
+     localtime_r(&m_curTime, &m_curTimeTm);
+diff --git a/src/game/MotionGenerators/MoveMap.cpp b/src/game/MotionGenerators/MoveMap.cpp
+index 19bd97a..32693fe 100644
+--- a/src/game/MotionGenerators/MoveMap.cpp
++++ b/src/game/MotionGenerators/MoveMap.cpp
+@@ -21,6 +21,41 @@
+ #include "MotionGenerators/MoveMap.h"
+ #include "MoveMapSharedDefines.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include "Network/PageNet.h"
++#include <mutex>
++#include <set>
++#include <string>
++
++namespace
++{
++    std::mutex g_pageLock;
++    std::set<uint64> g_pageAsked;       // asked of the page already (a whole map: tile 0xFFFFFFFF)
++    std::set<uint32> g_pageNoHeader;    // maps whose header file is not there
++    bool g_pageAsking = false;          // off while the world loads
++
++    // While the world loads, the core passes over the terrain of whole continents (a creature's
++    // zone is looked up there). Nothing is asked for then: tiles are built where players are.
++    bool PageWanted(uint32 mapId, uint32 tile)
++    {
++        std::lock_guard<std::mutex> guard(g_pageLock);
++        if (!g_pageAsking)
++            return false;
++        return g_pageAsked.insert((uint64(mapId) << 32) | tile).second;
++    }
++
++    // Opening a file that is not there is a slow call in a tab, and this one would be made for
++    // every creature of the map.
++    bool PageNoHeader(uint32 mapId, bool remember)
++    {
++        std::lock_guard<std::mutex> guard(g_pageLock);
++        if (remember)
++            return g_pageNoHeader.insert(mapId).second;
++        return g_pageNoHeader.count(mapId) != 0;
++    }
++}
++#endif
++
+ namespace MMAP
+ {
+     constexpr char MAP_FILE_NAME_FORMAT[] = "mmaps/%03i.mmap";
+@@ -105,6 +140,11 @@ namespace MMAP
+         if (loadedMMaps.find(mapId) != loadedMMaps.end())
+             return true;
+ 
++#ifdef __EMSCRIPTEN__
++        if (PageNoHeader(mapId, false))
++            return false;
++#endif
++
+         // load and init dtNavMesh - read parameters from file
+         uint32 pathLen = basePath.length() + strlen(MAP_FILE_NAME_FORMAT) + 1;
+         char* fileName = new char[pathLen];
+@@ -113,8 +153,15 @@ namespace MMAP
+         FILE* file = fopen(fileName, "rb");
+         if (!file)
+         {
++#ifdef __EMSCRIPTEN__
++            // In a browser tab movement maps are built while the world runs: ask for this map once.
++            PageNoHeader(mapId, true);
++            if (MMapFactory::IsPathfindingEnabled(mapId) && PageWanted(mapId, 0xFFFFFFFF))
++                MaNGOS::PageNet::Notify("mmap", std::to_string(mapId).c_str());
++#else
+             if (MMapFactory::IsPathfindingEnabled(mapId))
+                 sLog.outError("MMAP:loadMapData: Error: Could not open mmap file '%s'", fileName);
++#endif
+             delete[] fileName;
+             return false;
+         }
+@@ -168,6 +215,10 @@ namespace MMAP
+     void MMapManager::loadAllMapTiles(std::string const& basePath, uint32 mapId)
+     {
+         auto itr = loadedMMaps.find(mapId);
++#ifdef __EMSCRIPTEN__
++        if (itr == loadedMMaps.end())
++            return;
++#endif
+         MANGOS_ASSERT(itr != loadedMMaps.end());
+         const auto& mmapData = itr->second;
+ 
+@@ -199,6 +250,11 @@ namespace MMAP
+     {
+         // get this mmap data
+         auto itr = loadedMMaps.find(mapId);
++#ifdef __EMSCRIPTEN__
++        // In a browser tab a map may have no movement-map data at all: nothing to load then.
++        if (itr == loadedMMaps.end())
++            return false;
++#endif
+         MANGOS_ASSERT(itr != loadedMMaps.end()); // must not occur here as it would not be thread safe - only in loadMapData through loadMapInstance
+ 
+         const auto& mmapData = itr->second;
+@@ -225,6 +281,14 @@ namespace MMAP
+         if (!file)
+         {
+             DEBUG_FILTER_LOG(LOG_FILTER_MAP_LOADING, "ERROR: MMAP:loadMap: Could not open mmtile file '%s'", filePath);
++#ifdef __EMSCRIPTEN__
++            // Ask the page to build this tile; it tells the server when the file is there.
++            if (PageWanted(mapId, packedGridPos))
++            {
++                std::string tile = std::to_string(mapId) + " " + std::to_string(x) + " " + std::to_string(y);
++                MaNGOS::PageNet::Notify("mmtile", tile.c_str());
++            }
++#endif
+             return false;
+         }
+ 
+@@ -541,3 +605,28 @@ namespace MMAP
+         return mmapGOData->navMeshGOQueries[threadId];
+     }
+ }
++
++#ifdef __EMSCRIPTEN__
++namespace MMAP
++{
++    // The world is up: from now on a missing tile or header is asked of the page.
++    void PageAsking()
++    {
++        std::lock_guard<std::mutex> guard(g_pageLock);
++        g_pageAsking = true;
++    }
++
++    // A tile the page has built since the terrain there was loaded (called by the world thread).
++    // x < 0: the whole map was built, so its header is there now.
++    void PageLoadTile(std::string const& basePath, uint32 mapId, int32 x, int32 y)
++    {
++        if (x < 0)
++        {
++            std::lock_guard<std::mutex> guard(g_pageLock);
++            g_pageNoHeader.erase(mapId);
++            return;
++        }
++        MMapFactory::createOrGetMMapManager()->loadMap(basePath, mapId, x, y);
++    }
++}
++#endif
+diff --git a/src/mangosd/CMakeLists.txt b/src/mangosd/CMakeLists.txt
+index e9a619e..8f6da97 100644
+--- a/src/mangosd/CMakeLists.txt
++++ b/src/mangosd/CMakeLists.txt
+@@ -48,16 +48,34 @@ if(WIN32)
+   endif()
+ endif()
+ 
++if(EMSCRIPTEN)
++  list(REMOVE_ITEM EXECUTABLE_SRCS MaNGOSsoap.cpp MaNGOSsoap.h soapC.cpp soapH.h soapServer.cpp soapStub.h)
++  # One program in the tab: the login server's socket code is linked in (see Master.cpp).
++  set(EXECUTABLE_SRCS ${EXECUTABLE_SRCS}
++    PageHost.cpp
++    ${CMAKE_SOURCE_DIR}/src/realmd/AuthSocket.cpp
++    ${CMAKE_SOURCE_DIR}/src/realmd/AuthSocket.h
++    ${CMAKE_SOURCE_DIR}/src/realmd/RealmList.cpp
++    ${CMAKE_SOURCE_DIR}/src/realmd/RealmList.h
++  )
++endif()
++
+ add_executable(${EXECUTABLE_NAME}
+   ${EXECUTABLE_SRCS}
+ )
+ 
++if(EMSCRIPTEN)
++  target_include_directories(${EXECUTABLE_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src/realmd)
++endif()
++
+ target_link_libraries(${EXECUTABLE_NAME}
+   shared
+   game
+-  gsoap
+   cmangos-compile-option-interface
+ )
++if(NOT EMSCRIPTEN)
++  target_link_libraries(${EXECUTABLE_NAME} gsoap)
++endif()
+ 
+ if(WIN32)
+   if(MSVC)
+@@ -70,6 +88,7 @@ if(WIN32)
+     target_link_libraries(${EXECUTABLE_NAME}
+       wsock32
+       ws2_32
++      winmm   # timeBeginPeriod/timeGetDevCaps in WorldRunnable.cpp
+     )
+   endif()
+ 
+@@ -106,7 +125,11 @@ endif()
+ 
+ set(EXECUTABLE_LINK_FLAGS "")
+ 
+-if(UNIX)
++if(EMSCRIPTEN)
++  # main() runs on a worker thread of its own, so the thread that owns the module stays free
++  # for the page's calls and for the file system. WEB_LINK_FLAGS adds what the embedder wants.
++  set(EXECUTABLE_LINK_FLAGS "-pthread -sPROXY_TO_PTHREAD=1 -sMODULARIZE=1 -sEXPORT_NAME=createMangosd -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sFORCE_FILESYSTEM=1 -sEXPORTED_FUNCTIONS=_main,_malloc,_free -sEXPORTED_RUNTIME_METHODS=FS,NODEFS,WORKERFS,callMain,ccall,UTF8ToString -lworkerfs.js -lnodefs.js -Wl,--wrap=fopen,--wrap=fclose ${WEB_LINK_FLAGS}")
++elseif(UNIX)
+   if (APPLE)
+     set(EXECUTABLE_LINK_FLAGS "-pthread -framework Carbon")
+   else()
+diff --git a/src/mangosd/Master.cpp b/src/mangosd/Master.cpp
+index efeb66e..d89a477 100644
+--- a/src/mangosd/Master.cpp
++++ b/src/mangosd/Master.cpp
+@@ -32,7 +32,9 @@
+ #include "RASocket.h"
+ #include "Util/Util.h"
+ #include "revision_sql.h"
++#ifndef __EMSCRIPTEN__
+ #include "MaNGOSsoap.h"
++#endif
+ #include "Mails/MassMailMgr.h"
+ #include "Server/DBCStores.h"
+ 
+@@ -44,6 +46,18 @@
+ 
+ #include <boost/thread.hpp>
+ 
++#ifdef __EMSCRIPTEN__
++#include "Network/PageNet.h"
++#include "AuthSocket.h"
++#include "RealmList.h"
++
++namespace MMAP
++{
++    // in game/MotionGenerators/MoveMap.cpp
++    void PageAsking();
++}
++#endif
++
+ #include <memory>
+ 
+ #ifdef _WIN32
+@@ -228,6 +242,22 @@ int Master::Run()
+         std::string bindIp = sConfig.GetStringDefault("BindIP", "0.0.0.0");
+         int32 port = int32(sWorld.getConfig(CONFIG_UINT32_PORT_WORLD));
+         MaNGOS::AsyncListener<WorldSocket> listener(m_context, bindIp, port);
++#ifdef __EMSCRIPTEN__
++        // One program in the tab: the login server's sockets are served here as well.
++        // The realm carries the name of the world the page runs (Page.RealmName), as the list shows it.
++        {
++            std::string realmName = sConfig.GetStringDefault("Page.RealmName", "");
++            if (!realmName.empty())
++            {
++                LoginDatabase.escape_string(realmName);
++                LoginDatabase.DirectPExecute("UPDATE realmlist SET name = '%s' WHERE id = '%u'", realmName.c_str(), realmID);
++            }
++        }
++        sRealmList.Initialize(0);
++        MaNGOS::AsyncListener<AuthSocket> authListener(m_context, bindIp, 3724);
++        // No socket is ever pending, so keep the network threads waiting for the page.
++        auto pageWork = boost::asio::make_work_guard(m_context);
++#endif
+ 
+         std::vector<std::thread> threads;
+         for (int32 i = 0; i < networkThreadCount; ++i)
+@@ -244,9 +274,19 @@ int Master::Run()
+             m_raThread = std::thread([this]() { m_raContext.run(); });
+         }
+ 
++#ifndef __EMSCRIPTEN__
+         std::unique_ptr<SOAPThread> soapThread;
+         if (sConfig.GetBoolDefault("SOAP.Enabled", false))
+             soapThread.reset(new SOAPThread(sConfig.GetStringDefault("SOAP.IP", "127.0.0.1"), sConfig.GetIntDefault("SOAP.Port", 7878)));
++#endif
++
++#ifdef __EMSCRIPTEN__
++        // The world's content is in memory now: the database pages read for it are not needed again.
++        WorldDatabase.DirectExecute("PRAGMA cache_size=-16384");
++        WorldDatabase.DirectExecute("PRAGMA shrink_memory");
++        MMAP::PageAsking();
++        MaNGOS::PageNet::Notify("ready", "");
++#endif
+ 
+         // wait for shut down and then let things go out of scope to close them down
+         while (!World::IsStopped())
+@@ -334,6 +374,10 @@ int Master::Run()
+     // mark this can be killable
+     m_canBeKilled = true;
+ 
++#ifdef __EMSCRIPTEN__
++    MaNGOS::PageNet::Notify("stopped", "");
++#endif
++
+     ///- Exit the process with specified return value
+     return World::GetExitCode();
+ }
+diff --git a/src/mangosd/PageHost.cpp b/src/mangosd/PageHost.cpp
+new file mode 100644
+index 0000000..97eedc2
+--- /dev/null
++++ b/src/mangosd/PageHost.cpp
+@@ -0,0 +1,248 @@
++/*
++ * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++// What the page can ask of a server that runs inside its tab, besides game connections
++// (those are in shared/Network/PageNet.cpp): stop, console commands, database snapshots, and
++// taking over the characters and accounts of a world that another player's browser runs.
++
++#ifdef __EMSCRIPTEN__
++
++#include "Common.h"
++#include "World/World.h"
++#include "Database/DatabaseEnv.h"
++#include "Network/PageNet.h"
++#include "Accounts/AccountMgr.h"
++#include "Globals/ObjectMgr.h"
++
++#include <emscripten.h>
++
++#include <array>
++#include <atomic>
++#include <cstdio>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <unistd.h>
++
++namespace MMAP
++{
++    // in game/MotionGenerators/MoveMap.cpp
++    void PageLoadTile(std::string const& basePath, uint32 mapId, int32 x, int32 y);
++}
++
++namespace
++{
++    std::atomic<bool> g_snapshotWanted(false);
++    std::atomic<int> g_adoptWanted(0);
++
++    // Tables of the characters database whose rows a server reads into memory when it starts.
++    const char* const HELD_IN_MEMORY[] =
++    {
++        "auction", "corpse", "groups", "group_member", "group_instance", "guild", "guild_member", "guild_rank",
++        "instance", "instance_reset", "item_text", "gm_tickets"
++    };
++
++    bool Differ(Database& db, const char* table)
++    {
++        if (db.PQuery("SELECT 1 FROM (SELECT * FROM main.%s EXCEPT SELECT * FROM incoming.%s) LIMIT 1", table, table))
++            return true;
++        return bool(db.PQuery("SELECT 1 FROM (SELECT * FROM incoming.%s EXCEPT SELECT * FROM main.%s) LIMIT 1", table, table));
++    }
++
++    // The rows of every table of `db` are replaced by those of the database file `file`, which
++    // the page put there: the same database as another player's browser last saved it. The
++    // server keeps running; nobody is playing on it.
++    //   "ok"     done (or there was no such file)
++    //   "stale"  rows this server holds in memory differ: only a server started afresh has them right
++    //   "failed"
++    const char* AdoptFile(Database& db, const char* file, bool checkHeld)
++    {
++        if (access(file, F_OK) != 0)
++            return "ok";
++
++        const char* answer = "ok";
++        // One of the database's connections reads, the other writes: both are shown the file.
++        db.PQuery("ATTACH DATABASE '%s' AS incoming", file);
++        if (!db.DirectPExecute("ATTACH DATABASE '%s' AS incoming", file))
++            answer = "failed";
++        else
++        {
++            if (checkHeld)
++            {
++                for (const char* table : HELD_IN_MEMORY)
++                {
++                    if (Differ(db, table))
++                    {
++                        answer = "stale";
++                        break;
++                    }
++                }
++            }
++            if (answer[0] == 'o')
++            {
++                std::vector<std::string> tables;
++                {
++                    auto result = db.Query("SELECT name FROM incoming.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'");
++                    if (result)
++                    {
++                        do
++                            tables.push_back(result->Fetch()[0].GetCppString());
++                        while (result->NextRow());
++                    }
++                }
++                for (auto const& table : tables)
++                {
++                    if (!db.DirectPExecute("DELETE FROM main.\"%s\"", table.c_str()) ||
++                            !db.DirectPExecute("INSERT INTO main.\"%s\" SELECT * FROM incoming.\"%s\"", table.c_str(), table.c_str()))
++                    {
++                        answer = "failed";
++                        break;
++                    }
++                }
++            }
++            db.DirectExecute("DETACH DATABASE incoming");
++        }
++        db.Query("DETACH DATABASE incoming");
++        remove(file);
++        return answer;
++    }
++
++    const char* Adopt()
++    {
++        if (sWorld.GetActiveAndQueuedSessionCount() > 0)
++            return "busy";
++        const char* characters = AdoptFile(CharacterDatabase, "/db/incoming-characters.sqlite", true);
++        if (characters[0] != 'o')
++        {
++            remove("/db/incoming-realmd.sqlite");
++            return characters;
++        }
++        const char* accounts = AdoptFile(LoginDatabase, "/db/incoming-realmd.sqlite", false);
++        if (accounts[0] != 'o')
++            return accounts;
++        // As a server does when it starts: nobody is in the world, and new characters, items and
++        // mails are numbered after the highest ones there are.
++        CharacterDatabase.DirectExecute("UPDATE characters SET online = 0 WHERE online <> 0");
++        LoginDatabase.DirectExecute("UPDATE account SET active_realm_id = 0 WHERE active_realm_id <> 0");
++        sObjectMgr.SetHighestGuids();
++        sObjectMgr.LoadPetNumber();
++        return "ok";
++    }
++
++    std::mutex g_tileLock;
++    std::vector<std::array<uint32, 3>> g_tiles;     // movement-map tiles that are ready to load
++    std::vector<std::pair<std::string, std::string>> g_merges;  // accounts whose characters move to another
++}
++
++// Called by the world thread once per loop, between two world updates (no map is being updated).
++void PageHostTick()
++{
++    std::vector<std::array<uint32, 3>> tiles;
++    {
++        std::lock_guard<std::mutex> guard(g_tileLock);
++        tiles.swap(g_tiles);
++    }
++    for (auto const& tile : tiles)
++        MMAP::PageLoadTile(sWorld.GetDataPath(), tile[0], int32(tile[1]), int32(tile[2]));
++
++    std::vector<std::pair<std::string, std::string>> merges;
++    {
++        std::lock_guard<std::mutex> guard(g_tileLock);
++        merges.swap(g_merges);
++    }
++    for (auto const& merge : merges)
++    {
++        uint32 from = sAccountMgr.GetId(merge.first);
++        uint32 to = sAccountMgr.GetId(merge.second);
++        if (from && to && from != to)
++            CharacterDatabase.DirectPExecute("UPDATE characters SET account = %u WHERE account = %u", to, from);
++        MaNGOS::PageNet::Notify("merged", merge.first.c_str());
++    }
++
++    if (int tag = g_adoptWanted.exchange(0))
++    {
++        std::string detail = std::to_string(tag) + "\n" + Adopt();
++        MaNGOS::PageNet::Notify("adopted", detail.c_str());
++    }
++
++    if (!g_snapshotWanted.exchange(false))
++        return;
++
++    // Consistent copies of the two databases that change in play; the page stores them.
++    remove("/snapshot/characters.sqlite");
++    remove("/snapshot/realmd.sqlite");
++    bool ok = CharacterDatabase.DirectExecute("VACUUM INTO '/snapshot/characters.sqlite'");
++    ok = LoginDatabase.DirectExecute("VACUUM INTO '/snapshot/realmd.sqlite'") && ok;
++    MaNGOS::PageNet::Notify("snapshot", ok ? "ok" : "failed");
++}
++
++extern "C"
++{
++    EMSCRIPTEN_KEEPALIVE void electrode_stop()
++    {
++        World::StopNow(SHUTDOWN_EXIT_CODE);
++    }
++
++    // A console command, as typed at the server's own prompt. The output comes back as a
++    // "command" event: the tag, then "ok" or "failed", then the text, one per line.
++    EMSCRIPTEN_KEEPALIVE void electrode_command(int tag, const char* command)
++    {
++        std::shared_ptr<std::string> out = std::make_shared<std::string>();
++        sWorld.QueueCliCommand(new CliCommandHolder(0, SEC_CONSOLE, command,
++            [out](const char* text) { out->append(text); },
++            [out, tag](bool success)
++            {
++                std::string detail = std::to_string(tag) + "\n" + (success ? "ok" : "failed") + "\n" + *out;
++                MaNGOS::PageNet::Notify("command", detail.c_str());
++            }));
++    }
++
++    EMSCRIPTEN_KEEPALIVE void electrode_snapshot()
++    {
++        g_snapshotWanted = true;
++    }
++
++    // The page put the characters and accounts databases of the world, as its host last saved
++    // them, at /db/incoming-characters.sqlite and /db/incoming-realmd.sqlite: this server takes
++    // their rows in place of its own. Answered by an "adopted" event: the tag, then "ok",
++    // "stale" (start this server afresh instead), "busy" (somebody is playing here) or "failed".
++    EMSCRIPTEN_KEEPALIVE void electrode_adopt(int tag)
++    {
++        g_adoptWanted = tag;
++    }
++
++    // One player had two accounts in this world (one from running it, one from joining it): the
++    // characters of `from` go to `to`. Asked before anyone is in the world; answered by a "merged" event.
++    EMSCRIPTEN_KEEPALIVE void electrode_merge_account(const char* from, const char* to)
++    {
++        std::lock_guard<std::mutex> guard(g_tileLock);
++        g_merges.emplace_back(from, to);
++    }
++
++    // A movement-map tile the server asked for ("mmtile" event) is now in the data folder.
++    // x and y of -1: the whole map ("mmap" event) is.
++    EMSCRIPTEN_KEEPALIVE void electrode_mmap_tile(int map, int x, int y)
++    {
++        std::lock_guard<std::mutex> guard(g_tileLock);
++        g_tiles.push_back({ uint32(map), uint32(x), uint32(y) });
++    }
++}
++
++#endif
+diff --git a/src/mangosd/WorldRunnable.cpp b/src/mangosd/WorldRunnable.cpp
+index 62f61fa..4e998df 100644
+--- a/src/mangosd/WorldRunnable.cpp
++++ b/src/mangosd/WorldRunnable.cpp
+@@ -23,6 +23,10 @@
+ #include "Common.h"
+ #include "World/World.h"
+ #include "WorldRunnable.h"
++
++#ifdef __EMSCRIPTEN__
++void PageHostTick();
++#endif
+ #include "Util/Timer.h"
+ #include "Globals/ObjectAccessor.h"
+ #include "Maps/MapManager.h"
+@@ -84,6 +88,9 @@ void WorldRunnable::run()
+ 
+         diffTick = WorldTimer::tick();
+         sWorld.Update(diffTick);
++#ifdef __EMSCRIPTEN__
++        PageHostTick();
++#endif
+         diffTime = WorldTimer::getMSTime() - WorldTimer::tickTime();
+ 
+         // we have to wait WORLD_SLEEP_CONST max between loops
+diff --git a/src/realmd/AuthSocket.cpp b/src/realmd/AuthSocket.cpp
+index 170a2e9..ed44a0b 100644
+--- a/src/realmd/AuthSocket.cpp
++++ b/src/realmd/AuthSocket.cpp
+@@ -192,12 +192,16 @@ const char logonProofUnknownAccountPinInvalid[4] = { CMD_AUTH_LOGON_PROOF, AUTH_
+ 
+ /// Constructor - set the N and g values for SRP6
+ AuthSocket::AuthSocket(boost::asio::io_context& context)
+-    : AsyncSocket<AuthSocket>(context), _status(STATUS_CHALLENGE), _build(0), _accountSecurityLevel(SEC_PLAYER), m_timeoutTimer(context)
++    : AsyncSocket<AuthSocket>(context), _status(STATUS_CHALLENGE), _build(0), _accountSecurityLevel(SEC_PLAYER)
++#ifndef __EMSCRIPTEN__
++    , m_timeoutTimer(context)
++#endif
+ {
+ }
+ 
+ bool AuthSocket::OnOpen()
+ {
++#ifndef __EMSCRIPTEN__
+     m_timeoutTimer.expires_after(std::chrono::seconds(30));
+     m_timeoutTimer.async_wait([&] (const boost::system::error_code& error)
+     {
+@@ -209,6 +213,7 @@ bool AuthSocket::OnOpen()
+         if (!IsClosed())
+             Close();
+     });
++#endif
+ 
+     return true;
+ }
+@@ -275,7 +280,9 @@ bool AuthSocket::ProcessIncomingData()
+         }
+ 
+         // if we reach here, it means that a valid opcode was found and the handler completed successfully
++#ifndef __EMSCRIPTEN__
+         self->m_timeoutTimer.cancel();
++#endif
+     });
+ 
+     return true;
+diff --git a/src/realmd/AuthSocket.h b/src/realmd/AuthSocket.h
+index 25948f0..cc73b22 100644
+--- a/src/realmd/AuthSocket.h
++++ b/src/realmd/AuthSocket.h
+@@ -100,7 +100,9 @@ class AuthSocket : public MaNGOS::AsyncSocket<AuthSocket>
+         uint32 m_gridSeed = 0;
+         bool m_promptPin = false;
+ 
++#ifndef __EMSCRIPTEN__
+         boost::asio::system_timer m_timeoutTimer;
++#endif
+ 
+         virtual bool ProcessIncomingData() override;
+ };
+diff --git a/src/shared/CMakeLists.txt b/src/shared/CMakeLists.txt
+index ca9a4a2..6b1dc1a 100644
+--- a/src/shared/CMakeLists.txt
++++ b/src/shared/CMakeLists.txt
+@@ -99,6 +99,10 @@ endif()
+ set(SRC_GRP_NETWORK
+     Network/AsyncSocket.hpp
+     Network/AsyncListener.hpp
++    Network/PageNet.cpp
++    Platform/PageStdio.cpp
++    Network/PageNet.h
++    Network/PageSocket.hpp
+ )
+ 
+ set(SRC_GRP_PLATFORM
+diff --git a/src/shared/Database/DatabaseSqlite.cpp b/src/shared/Database/DatabaseSqlite.cpp
+index 56c6184..37f8644 100644
+--- a/src/shared/Database/DatabaseSqlite.cpp
++++ b/src/shared/Database/DatabaseSqlite.cpp
+@@ -44,16 +44,32 @@ SQLiteConnection::~SQLiteConnection()
+ 
+ bool SQLiteConnection::Initialize(const char* infoString)
+ {
++#ifdef __EMSCRIPTEN__
++    // One process owns the files, with several connections. The "unix-excl" VFS keeps the WAL index
++    // in ordinary memory (a tab has no shared-memory files), so readers and the writer do not block
++    // each other, as with WAL on a desktop.
++    if (sqlite3_open_v2(infoString, &mSqlite, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix-excl") != SQLITE_OK)
++#else
+     if (sqlite3_open(infoString, &mSqlite) != SQLITE_OK)
++#endif
+     {
+         sLog.outError("Could not open SQLite database");
+         return false;
+     }
++#ifdef __EMSCRIPTEN__
++    // The files live in memory inside the tab: nothing to sync to.
++    sqlite3_exec(mSqlite, "PRAGMA journal_mode=WAL;", 0, 0, 0);
++    sqlite3_exec(mSqlite, "PRAGMA synchronous=0;", 0, 0, 0);
++    // Reading a page is a call to another thread there, so pages are kept once read (up to 160 MB
++    // while the world loads; Master.cpp gives the memory back when the world is up).
++    sqlite3_exec(mSqlite, "PRAGMA cache_size=-163840;", 0, 0, 0);
++#else
+     sqlite3_exec(mSqlite, "PRAGMA journal_mode=WAL;", 0, 0, 0);
+     sqlite3_exec(mSqlite, "PRAGMA synchronous=1;", 0, 0, 0);
++#endif
+     sqlite3_exec(mSqlite, "PRAGMA secure_delete=off;", 0, 0, 0);
+     sqlite3_exec(mSqlite, "PRAGMA encoding='UTF-8';", 0, 0, 0);
+-    sqlite3_busy_timeout(mSqlite, 2);
++    sqlite3_busy_timeout(mSqlite, 30000);
+ 
+     Tokens tokens = StrSplit(infoString, ";");
+ 
+@@ -82,8 +98,12 @@ bool SQLiteConnection::_Query(const char* sql, sqlite3_stmt** pStmt)
+ std::unique_ptr<QueryResult> SQLiteConnection::Query(const char* sql)
+ {
+     sqlite3_stmt** pStmt = new(sqlite3_stmt*);
++    *pStmt = nullptr;
+     if (!_Query(sql, pStmt))
++    {
++        delete pStmt;
+         return nullptr;
++    }
+ 
+     auto queryResult = std::make_unique<QueryResultSqlite>(pStmt);
+ 
+@@ -98,9 +118,13 @@ QueryNamedResult* SQLiteConnection::QueryNamed(const char* sql)
+     uint32 fieldCount = 0;
+ 
+     sqlite3_stmt** pStmt = new(sqlite3_stmt*);
++    *pStmt = nullptr;
+ 
+     if (!_Query(sql, pStmt))
++    {
++        delete pStmt;
+         return nullptr;
++    }
+ 
+     fieldCount = sqlite3_column_count(*pStmt);
+ 
+@@ -121,7 +145,8 @@ bool SQLiteConnection::Execute(const char* sql)
+ 
+     {
+         uint32 _s = WorldTimer::getMSTime();
+-        sqlite3_stmt** pStmt = new(sqlite3_stmt*);
++        sqlite3_stmt* stmt = nullptr;
++        sqlite3_stmt** pStmt = &stmt;
+ 
+         int result;
+         result = sqlite3_prepare_v2(mSqlite, sql, -1, pStmt, NULL);
+@@ -132,10 +157,11 @@ bool SQLiteConnection::Execute(const char* sql)
+             return false;
+         }
+         result = sqlite3_step(*pStmt);
+-        if (result != SQLITE_DONE && result != SQLITE_OK)
++        if (result != SQLITE_DONE && result != SQLITE_OK && result != SQLITE_ROW)
+         {
+             sLog.outErrorDb("SQL: %s", sql);
+             sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
++            sqlite3_finalize(*pStmt);
+             return false;
+         }
+         sqlite3_finalize(*pStmt);
+@@ -148,7 +174,8 @@ bool SQLiteConnection::Execute(const char* sql)
+ 
+ bool SQLiteConnection::_TransactionCmd(const char* sql)
+ {
+-    sqlite3_stmt** pStmt = new(sqlite3_stmt*);
++    sqlite3_stmt* stmt = nullptr;
++    sqlite3_stmt** pStmt = &stmt;
+ 
+     int result;
+     result = sqlite3_prepare_v2(mSqlite, sql, -1, pStmt, NULL);
+@@ -163,8 +190,10 @@ bool SQLiteConnection::_TransactionCmd(const char* sql)
+     {
+         sLog.outErrorDb("SQL: %s", sql);
+         sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
++        sqlite3_finalize(*pStmt);
+         return false;
+     }
++    sqlite3_finalize(*pStmt);
+     DEBUG_FILTER_LOG(LOG_FILTER_SQL_TEXT, "SQL: %s", sql);
+     return true;
+ }
+diff --git a/src/shared/Database/QueryResultSqlite.cpp b/src/shared/Database/QueryResultSqlite.cpp
+index 1c5b07d..034a8fa 100644
+--- a/src/shared/Database/QueryResultSqlite.cpp
++++ b/src/shared/Database/QueryResultSqlite.cpp
+@@ -50,6 +50,8 @@ QueryResultSqlite::QueryResultSqlite(sqlite3_stmt** stmt) :
+ QueryResultSqlite::~QueryResultSqlite()
+ {
+     EndQuery();
++    delete mStmt;
++    mStmt = nullptr;
+ }
+ 
+ bool QueryResultSqlite::NextRow()
+diff --git a/src/shared/Network/AsyncListener.hpp b/src/shared/Network/AsyncListener.hpp
+index a395d42..2b47950 100644
+--- a/src/shared/Network/AsyncListener.hpp
++++ b/src/shared/Network/AsyncListener.hpp
+@@ -19,6 +19,11 @@
+ #ifndef MANGOSSERVER_ASYNC_LISTENER
+ #define MANGOSSERVER_ASYNC_LISTENER
+ 
++#ifdef __EMSCRIPTEN__
++// inside a browser tab the page stands in for the network
++#include "Network/PageSocket.hpp"
++#else
++
+ #include "Platform/Define.h"
+ #include <boost/asio.hpp>
+ #include <boost/bind.hpp>
+@@ -56,4 +61,6 @@ namespace MaNGOS
+     };
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif // __EMSCRIPTEN__
++
++#endif
+diff --git a/src/shared/Network/AsyncSocket.hpp b/src/shared/Network/AsyncSocket.hpp
+index 4e4adbc..48cf78b 100644
+--- a/src/shared/Network/AsyncSocket.hpp
++++ b/src/shared/Network/AsyncSocket.hpp
+@@ -19,6 +19,11 @@
+ #ifndef MANGOSSERVER_ASYNC_SOCKET
+ #define MANGOSSERVER_ASYNC_SOCKET
+ 
++#ifdef __EMSCRIPTEN__
++// inside a browser tab the page stands in for the network
++#include "Network/PageSocket.hpp"
++#else
++
+ #include "Platform/Define.h"
+ #include <boost/asio.hpp>
+ #include <boost/enable_shared_from_this.hpp>
+@@ -136,4 +141,6 @@ namespace MaNGOS
+ 
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif // __EMSCRIPTEN__
++
++#endif
+diff --git a/src/shared/Network/PageNet.cpp b/src/shared/Network/PageNet.cpp
+new file mode 100644
+index 0000000..5a6bc5b
+--- /dev/null
++++ b/src/shared/Network/PageNet.cpp
+@@ -0,0 +1,142 @@
++/*
++* This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
++*
++* This program is free software; you can redistribute it and/or modify
++* it under the terms of the GNU General Public License as published by
++* the Free Software Foundation; either version 2 of the License, or
++* (at your option) any later version.
++*
++* This program is distributed in the hope that it will be useful,
++* but WITHOUT ANY WARRANTY; without even the implied warranty of
++* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++* GNU General Public License for more details.
++*
++* You should have received a copy of the GNU General Public License
++* along with this program; if not, write to the Free Software
++* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++*/
++
++#ifdef __EMSCRIPTEN__
++
++#include "Network/PageNet.h"
++
++#include <emscripten.h>
++#include <emscripten/threading.h>
++
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++
++namespace
++{
++    std::mutex g_lock;
++    std::map<uint16, MaNGOS::PageNet::Factory> g_listeners;
++    std::map<uint32, std::weak_ptr<MaNGOS::PageConn>> g_conns;
++    uint32 g_nextId = 1;
++
++    std::shared_ptr<MaNGOS::PageConn> Find(uint32 id, bool erase)
++    {
++        std::lock_guard<std::mutex> guard(g_lock);
++        auto itr = g_conns.find(id);
++        if (itr == g_conns.end())
++            return nullptr;
++        std::shared_ptr<MaNGOS::PageConn> conn = itr->second.lock();
++        if (erase || !conn)
++            g_conns.erase(itr);
++        return conn;
++    }
++}
++
++void MaNGOS::PageNet::Listen(uint16 port, Factory factory)
++{
++    std::lock_guard<std::mutex> guard(g_lock);
++    g_listeners[port] = std::move(factory);
++}
++
++void MaNGOS::PageNet::Unlisten(uint16 port)
++{
++    std::lock_guard<std::mutex> guard(g_lock);
++    g_listeners.erase(port);
++}
++
++// The page's side lives on the thread that created the module: Module.pageNet = { data, closed, event }.
++// Calls from other threads are queued to it in order.
++
++void MaNGOS::PageNet::Send(uint32 id, const char* data, size_t length)
++{
++    if (!length)
++        return;
++    char* copy = static_cast<char*>(malloc(length));
++    if (!copy)
++        return;
++    memcpy(copy, data, length);
++    MAIN_THREAD_ASYNC_EM_ASM({
++        var bytes = HEAPU8.slice($1, $1 + $2);
++        _free($1);
++        Module['pageNet']['data']($0, bytes);
++    }, id, copy, length);
++}
++
++void MaNGOS::PageNet::Closed(uint32 id)
++{
++    Forget(id);
++    MAIN_THREAD_ASYNC_EM_ASM({ Module['pageNet']['closed']($0); }, id);
++}
++
++void MaNGOS::PageNet::Forget(uint32 id)
++{
++    std::lock_guard<std::mutex> guard(g_lock);
++    g_conns.erase(id);
++}
++
++void MaNGOS::PageNet::Notify(const char* name, const char* detail)
++{
++    MAIN_THREAD_ASYNC_EM_ASM({
++        var name = UTF8ToString($0);
++        var detail = UTF8ToString($1);
++        _free($0);
++        _free($1);
++        Module['pageNet']['event'](name, detail);
++    }, strdup(name), strdup(detail ? detail : ""));
++}
++
++extern "C"
++{
++    // A new connection to a port the server listens on. Returns its id, or 0.
++    EMSCRIPTEN_KEEPALIVE int electrode_open(int port)
++    {
++        MaNGOS::PageNet::Factory factory;
++        uint32 id;
++        {
++            std::lock_guard<std::mutex> guard(g_lock);
++            auto itr = g_listeners.find(uint16(port));
++            if (itr == g_listeners.end())
++                return 0;
++            factory = itr->second;
++            id = g_nextId++;
++        }
++        std::shared_ptr<MaNGOS::PageConn> conn = factory(id);
++        if (!conn)
++            return 0;
++        std::lock_guard<std::mutex> guard(g_lock);
++        g_conns[id] = conn;
++        return int(id);
++    }
++
++    EMSCRIPTEN_KEEPALIVE void electrode_data(int id, const char* data, int length)
++    {
++        if (length <= 0)
++            return;
++        if (std::shared_ptr<MaNGOS::PageConn> conn = Find(uint32(id), false))
++            conn->PageDeliver(data, size_t(length));
++    }
++
++    EMSCRIPTEN_KEEPALIVE void electrode_close(int id)
++    {
++        if (std::shared_ptr<MaNGOS::PageConn> conn = Find(uint32(id), true))
++            conn->PageRemoteClosed();
++    }
++}
++
++#endif
+diff --git a/src/shared/Network/PageNet.h b/src/shared/Network/PageNet.h
+new file mode 100644
+index 0000000..54bf8c6
+--- /dev/null
++++ b/src/shared/Network/PageNet.h
+@@ -0,0 +1,57 @@
++/*
++* This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
++*
++* This program is free software; you can redistribute it and/or modify
++* it under the terms of the GNU General Public License as published by
++* the Free Software Foundation; either version 2 of the License, or
++* (at your option) any later version.
++*
++* This program is distributed in the hope that it will be useful,
++* but WITHOUT ANY WARRANTY; without even the implied warranty of
++* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++* GNU General Public License for more details.
++*
++* You should have received a copy of the GNU General Public License
++* along with this program; if not, write to the Free Software
++* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++*/
++
++#ifndef MANGOSSERVER_PAGE_NET
++#define MANGOSSERVER_PAGE_NET
++
++#ifdef __EMSCRIPTEN__
++
++#include "Platform/Define.h"
++#include <cstddef>
++#include <functional>
++#include <memory>
++
++// The server inside a browser tab has no network: the game client runs in the same page and
++// its connections arrive as calls from the page (electrode_open/data/close), not as sockets.
++
++namespace MaNGOS
++{
++    // One connection from the page.
++    class PageConn
++    {
++        public:
++            virtual ~PageConn() {}
++            virtual void PageDeliver(const char* data, size_t length) = 0;  // bytes from the client
++            virtual void PageRemoteClosed() = 0;                             // the client closed it
++    };
++
++    namespace PageNet
++    {
++        typedef std::function<std::shared_ptr<PageConn>(uint32 /*id*/)> Factory;
++
++        void Listen(uint16 port, Factory factory);
++        void Unlisten(uint16 port);
++        void Send(uint32 id, const char* data, size_t length);  // bytes to the client
++        void Closed(uint32 id);                                 // the server closed it
++        void Forget(uint32 id);
++        void Notify(const char* name, const char* detail);      // an event for the page
++    }
++}
++
++#endif
++#endif
+diff --git a/src/shared/Network/PageSocket.hpp b/src/shared/Network/PageSocket.hpp
+new file mode 100644
+index 0000000..eac0ee1
+--- /dev/null
++++ b/src/shared/Network/PageSocket.hpp
+@@ -0,0 +1,270 @@
++/*
++* This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
++*
++* This program is free software; you can redistribute it and/or modify
++* it under the terms of the GNU General Public License as published by
++* the Free Software Foundation; either version 2 of the License, or
++* (at your option) any later version.
++*
++* This program is distributed in the hope that it will be useful,
++* but WITHOUT ANY WARRANTY; without even the implied warranty of
++* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++* GNU General Public License for more details.
++*
++* You should have received a copy of the GNU General Public License
++* along with this program; if not, write to the Free Software
++* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++*/
++
++#ifndef MANGOSSERVER_PAGE_SOCKET
++#define MANGOSSERVER_PAGE_SOCKET
++
++// AsyncSocket and AsyncListener for a server that runs inside a browser tab: the same interface
++// as the Boost.Asio ones, with a byte queue filled by the page in place of a TCP socket.
++// Completion callbacks still run on the io_context's threads, one at a time per socket.
++
++#include "Platform/Define.h"
++#include <boost/asio.hpp>
++#include "Log/Log.h"
++#include "Network/PageNet.h"
++
++#include <atomic>
++#include <cstring>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace MaNGOS
++{
++    template <typename SocketType>
++    class AsyncSocket : public std::enable_shared_from_this<SocketType>, public PageConn
++    {
++        public:
++            typedef std::function<void(const boost::system::error_code&, std::size_t)> Callback;
++
++            AsyncSocket(boost::asio::io_context& io_context) : m_context(io_context), m_id(0), m_closed(true),
++                m_inboundPos(0), m_readBuffer(nullptr), m_readLength(0), m_untilBuffer(nullptr), m_untilDelimiter(0),
++                m_address("127.0.0.1"), m_remoteEndpoint("127.0.0.1:0"),
++                m_remoteAddress(boost::asio::ip::make_address("127.0.0.1")), m_remotePort(0)
++            {
++            }
++
++            virtual ~AsyncSocket()
++            {
++                if (m_id)
++                    PageNet::Forget(m_id);
++            }
++
++            void Read(char* buffer, size_t length, Callback&& callback)
++            {
++                std::unique_lock<std::mutex> guard(m_ioMutex);
++                if (m_closed)
++                {
++                    guard.unlock();
++                    Complete(std::move(callback), boost::asio::error::operation_aborted, 0);
++                    return;
++                }
++                m_readBuffer = buffer;
++                m_readLength = length;
++                m_untilBuffer = nullptr;
++                m_readCallback = std::move(callback);
++                TryComplete(guard);
++            }
++
++            void ReadUntil(std::string& buffer, char delimiter, Callback&& callback)
++            {
++                std::unique_lock<std::mutex> guard(m_ioMutex);
++                if (m_closed)
++                {
++                    guard.unlock();
++                    Complete(std::move(callback), boost::asio::error::operation_aborted, 0);
++                    return;
++                }
++                m_readBuffer = nullptr;
++                m_untilBuffer = &buffer;
++                m_untilDelimiter = delimiter;
++                m_readCallback = std::move(callback);
++                TryComplete(guard);
++            }
++
++            void ReadSkip(size_t skipSize, Callback&& callback)
++            {
++                std::shared_ptr<std::vector<uint8>> buffer = std::make_shared<std::vector<uint8>>(skipSize);
++                Read(reinterpret_cast<char*>(buffer->data()), skipSize, [callback, buffer](const boost::system::error_code& error, std::size_t read)
++                {
++                    callback(error, read);
++                });
++            }
++
++            void Write(const char* buffer, size_t length, Callback&& callback)
++            {
++                if (m_closed)
++                {
++                    Complete(std::move(callback), boost::asio::error::operation_aborted, 0);
++                    return;
++                }
++                PageNet::Send(m_id, buffer, length);
++                Complete(std::move(callback), boost::system::error_code(), length);
++            }
++
++            // called by the listener before Start
++            void PageAttach(uint32 id)
++            {
++                m_id = id;
++                m_closed = false;
++            }
++
++            bool Start()
++            {
++                OnOpen();
++                ProcessIncomingData();
++                return true;
++            }
++
++            void Close()
++            {
++                if (Shut(boost::asio::error::operation_aborted))
++                    PageNet::Closed(m_id);
++            }
++
++            virtual bool Deletable() const { return IsClosed(); }
++            bool IsClosed() const { return m_closed; }
++
++            boost::asio::ip::address GetRemoteIpAddress() const { return m_remoteAddress; }
++            uint16 GetRemotePort() const { return m_remotePort; }
++
++            std::string const& GetRemoteEndpoint() const { return m_remoteEndpoint; }
++            std::string const& GetRemoteAddress() const { return m_address; }
++
++            // PageConn
++            void PageDeliver(const char* data, size_t length) override
++            {
++                std::unique_lock<std::mutex> guard(m_ioMutex);
++                if (m_closed)
++                    return;
++                m_inbound.insert(m_inbound.end(), data, data + length);
++                TryComplete(guard);
++            }
++
++            void PageRemoteClosed() override
++            {
++                Shut(boost::asio::error::eof);
++            }
++
++        private:
++            virtual bool ProcessIncomingData() = 0;
++            virtual bool OnOpen() = 0;
++
++            void Complete(Callback&& callback, boost::system::error_code const& error, std::size_t count)
++            {
++                boost::asio::post(m_context, [callback = std::move(callback), error, count]() { callback(error, count); });
++            }
++
++            // marks the socket closed and fails the waiting read; false if it was closed already
++            bool Shut(boost::system::error_code const& error)
++            {
++                Callback callback;
++                {
++                    std::lock_guard<std::mutex> guard(m_ioMutex);
++                    if (m_closed)
++                        return false;
++                    m_closed = true;
++                    callback = std::move(m_readCallback);
++                    m_readCallback = nullptr;
++                    m_inbound.clear();
++                    m_inboundPos = 0;
++                }
++                if (callback)
++                    Complete(std::move(callback), error, 0);
++                return true;
++            }
++
++            // with m_ioMutex held: finish the waiting read if the queue now holds enough
++            void TryComplete(std::unique_lock<std::mutex>& guard)
++            {
++                if (!m_readCallback)
++                    return;
++                size_t available = m_inbound.size() - m_inboundPos;
++                size_t count;
++                if (m_untilBuffer)
++                {
++                    const char* begin = m_inbound.data() + m_inboundPos;
++                    const void* hit = available ? memchr(begin, m_untilDelimiter, available) : nullptr;
++                    if (!hit)
++                        return;
++                    count = size_t(static_cast<const char*>(hit) - begin) + 1;
++                    m_untilBuffer->append(begin, count);
++                }
++                else
++                {
++                    if (available < m_readLength)
++                        return;
++                    count = m_readLength;
++                    if (count)
++                        memcpy(m_readBuffer, m_inbound.data() + m_inboundPos, count);
++                }
++                m_inboundPos += count;
++                if (m_inboundPos == m_inbound.size())
++                {
++                    m_inbound.clear();
++                    m_inboundPos = 0;
++                }
++                else if (m_inboundPos > 65536)
++                {
++                    m_inbound.erase(m_inbound.begin(), m_inbound.begin() + m_inboundPos);
++                    m_inboundPos = 0;
++                }
++                Callback callback = std::move(m_readCallback);
++                m_readCallback = nullptr;
++                guard.unlock();
++                Complete(std::move(callback), boost::system::error_code(), count);
++            }
++
++            boost::asio::io_context& m_context;
++            uint32 m_id;
++            std::atomic<bool> m_closed;
++
++            std::mutex m_ioMutex;
++            std::vector<char> m_inbound;
++            size_t m_inboundPos;
++            char* m_readBuffer;
++            size_t m_readLength;
++            std::string* m_untilBuffer;
++            char m_untilDelimiter;
++            Callback m_readCallback;
++
++            std::string m_address;
++            std::string m_remoteEndpoint;
++            boost::asio::ip::address m_remoteAddress;
++            uint16 m_remotePort;
++    };
++
++    template <typename SocketType>
++    class AsyncListener
++    {
++        public:
++            AsyncListener(boost::asio::io_context& io_context, std::string const& /*bindIp*/, unsigned short port) : m_port(port)
++            {
++                boost::asio::io_context* context = &io_context;
++                PageNet::Listen(port, [context](uint32 id) -> std::shared_ptr<PageConn>
++                {
++                    std::shared_ptr<SocketType> connection = std::make_shared<SocketType>(*context);
++                    connection->PageAttach(id);
++                    boost::asio::post(*context, [connection]() { connection->Start(); });
++                    return connection;
++                });
++            }
++
++            ~AsyncListener()
++            {
++                PageNet::Unlisten(m_port);
++            }
++
++        private:
++            uint16 m_port;
++    };
++}
++
++#endif
+diff --git a/src/shared/Platform/PageStdio.cpp b/src/shared/Platform/PageStdio.cpp
+new file mode 100644
+index 0000000..c9f3111
+--- /dev/null
++++ b/src/shared/Platform/PageStdio.cpp
+@@ -0,0 +1,78 @@
++/*
++ * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++// In a browser tab every read of a file is a call from the server's thread to the thread that
++// owns the file system, and such a call costs far more than the read itself. The C library reads
++// 1 KB at a time, which makes loading terrain and collision models tens of thousands of calls.
++// Files opened for reading get a large buffer instead. The executable is linked with
++// --wrap=fopen,--wrap=fclose so every fopen in the program comes through here.
++
++#ifdef __EMSCRIPTEN__
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <unordered_map>
++
++namespace
++{
++    const size_t READ_BUFFER = 256 * 1024;
++    std::mutex g_lock;
++    std::unordered_map<FILE*, char*> g_buffers;
++}
++
++extern "C"
++{
++    FILE* __real_fopen(const char* path, const char* mode);
++    int __real_fclose(FILE* file);
++
++    FILE* __wrap_fopen(const char* path, const char* mode)
++    {
++        FILE* file = __real_fopen(path, mode);
++        if (file && mode && mode[0] == 'r' && !strchr(mode, '+'))
++        {
++            if (char* buffer = static_cast<char*>(malloc(READ_BUFFER)))
++            {
++                setvbuf(file, buffer, _IOFBF, READ_BUFFER);
++                std::lock_guard<std::mutex> guard(g_lock);
++                g_buffers[file] = buffer;
++            }
++        }
++        return file;
++    }
++
++    int __wrap_fclose(FILE* file)
++    {
++        char* buffer = nullptr;
++        {
++            std::lock_guard<std::mutex> guard(g_lock);
++            auto itr = g_buffers.find(file);
++            if (itr != g_buffers.end())
++            {
++                buffer = itr->second;
++                g_buffers.erase(itr);
++            }
++        }
++        int result = __real_fclose(file);
++        free(buffer);
++        return result;
++    }
++}
++
++#endif

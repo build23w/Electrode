@@ -1,0 +1,192 @@
+diff --git a/contrib/extractor/loadlib/adt.cpp b/contrib/extractor/loadlib/adt.cpp
+index 8530daa13..cdffb02af 100644
+--- a/contrib/extractor/loadlib/adt.cpp
++++ b/contrib/extractor/loadlib/adt.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "adt.h"
+ #include <string.h>
++#include <stdio.h>
+ 
+ // Helper
+ int holetab_h[4] = {0x1111, 0x2222, 0x4444, 0x8888};
+@@ -16,6 +17,33 @@ bool isHole(int holes, int i, int j)
+     return (holes & holetab_h[testi] & holetab_v[testj]) != 0;
+ }
+ 
++// ---------------------------------------------------------------------------
++// LOCAL PATCH (not upstream): bounds checking for chunk offsets.
++//
++// Upstream trusts every offset in MHDR/MCIN/MCNK without validating it
++// against the loaded file size. A malformed ADT (e.g. from a rebuilt or
++// truncated MPQ) sends prepareLoadedData() chasing a wild pointer and the
++// extractor segfaults (observed: strncmp in adt_MCVT::prepareLoadedData on
++// Kalimdor_33_49.adt).
++//
++// The extractor ('ad') is single-threaded, so file-scope bounds avoid
++// touching any header or signature. On violation we log and return false,
++// which makes FileLoader::loadFile() fail => the tile is skipped instead of
++// crashing the whole extraction.
++// ---------------------------------------------------------------------------
++static const uint8* s_bounds_start = 0;
++static const uint8* s_bounds_end   = 0;
++
++static bool adt_inBounds(const void* p, unsigned long need, const char* what)
++{
++    const uint8* q = (const uint8*)p;
++    if (q >= s_bounds_start && q < s_bounds_end &&
++        (unsigned long)(s_bounds_end - q) >= need)
++        return true;
++    fprintf(stderr, "\nADT bounds check failed (%s): chunk offset outside file data\n", what);
++    return false;
++}
++
+ //
+ // Adt file loader class
+ //
+@@ -40,12 +68,22 @@ void ADT_file::free()
+ //
+ bool ADT_file::prepareLoadedData()
+ {
++    // PATCH: refuse files too small to contain even the version header
++    if (GetDataSize() < sizeof(file_MVER))
++        return false;
++
+     // Check parent
+     if (!FileLoader::prepareLoadedData())
+         return false;
+ 
++    // PATCH: establish bounds for this file
++    s_bounds_start = GetData();
++    s_bounds_end   = GetData() + GetDataSize();
++
+     // Check and prepare MHDR
+     a_grid = (adt_MHDR*)(GetData() + 8 + version->size);
++    if (!adt_inBounds(a_grid, sizeof(adt_MHDR), "MHDR"))
++        return false;
+     if (!a_grid->prepareLoadedData())
+         return false;
+ 
+@@ -61,12 +99,22 @@ bool adt_MHDR::prepareLoadedData()
+         return false;
+ 
+     // Check and prepare MCIN
+-    if (offsMCIN && !getMCIN()->prepareLoadedData())
+-        return false;
++    if (offsMCIN)
++    {
++        if (!adt_inBounds(getMCIN(), sizeof(adt_MCIN), "MCIN"))
++            return false;
++        if (!getMCIN()->prepareLoadedData())
++            return false;
++    }
+ 
+     // Check and prepare MH2O
+-    if (offsMH2O && !getMH2O()->prepareLoadedData())
+-        return false;
++    if (offsMH2O)
++    {
++        if (!adt_inBounds(getMH2O(), sizeof(adt_MH2O), "MH2O"))
++            return false;
++        if (!getMH2O()->prepareLoadedData())
++            return false;
++    }
+ 
+     return true;
+ }
+@@ -79,8 +127,13 @@ bool adt_MCIN::prepareLoadedData()
+     // Check cells data
+     for (int i = 0; i < ADT_CELLS_PER_GRID; i++)
+         for (int j = 0; j < ADT_CELLS_PER_GRID; j++)
+-            if (cells[i][j].offsMCNK && !getMCNK(i, j)->prepareLoadedData())
+-                return false;
++            if (cells[i][j].offsMCNK)
++            {
++                if (!adt_inBounds(getMCNK(i, j), sizeof(adt_MCNK), "MCNK"))
++                    return false;
++                if (!getMCNK(i, j)->prepareLoadedData())
++                    return false;
++            }
+ 
+     return true;
+ }
+@@ -103,11 +156,33 @@ bool adt_MCNK::prepareLoadedData()
+         return false;
+ 
+     // Check height map
+-    if (offsMCVT && !getMCVT()->prepareLoadedData())
+-        return false;
++    if (offsMCVT)
++    {
++        if (!adt_inBounds(getMCVT(), sizeof(adt_MCVT), "MCVT"))
++            return false;
++        if (!getMCVT()->prepareLoadedData())
++            return false;
++    }
+     // Check liquid data
+-    if (offsMCLQ && !getMCLQ()->prepareLoadedData())
+-        return false;
++    // PATCH v2: the map converter (System.cpp) reads MCLQ only through
++    // flags[8][8] — 728 bytes from chunk start; the trailing data[84] is
++    // never accessed, and MCLQ commonly sits at end-of-file, so requiring
++    // sizeof(adt_MCLQ) (812) rejected ~1,450 valid coastal tiles.
++    // A chunk that still fails bounds is degraded to "no liquid"
++    // (offset zeroed) instead of rejecting the tile; the converter
++    // already null-guards getMCLQ() (System.cpp: "if (!liquid || ...)").
++    // Empty liquid headers are skipped by the converter.
++    if (offsMCLQ && sizeMCLQ > 8)
++    {
++        const unsigned long MCLQ_READ_BYTES = 728;
++        if (!adt_inBounds(getMCLQ(), MCLQ_READ_BYTES, "MCLQ"))
++        {
++            fprintf(stderr, "  -> degrading: dropping liquid for this chunk, keeping the tile\n");
++            offsMCLQ = 0;
++        }
++        else if (!getMCLQ()->prepareLoadedData())
++            return false;
++    }
+ 
+     return true;
+ }
+diff --git a/contrib/extractor/loadlib/loadlib.cpp b/contrib/extractor/loadlib/loadlib.cpp
+index de2bfe24e..d8d2f2a90 100644
+--- a/contrib/extractor/loadlib/loadlib.cpp
++++ b/contrib/extractor/loadlib/loadlib.cpp
+@@ -7,6 +7,7 @@
+ #include <string.h>
+ 
+ class MPQFile;
++extern ArchiveSet gOpenArchives;
+ 
+ FileLoader::FileLoader()
+ {
+@@ -39,9 +40,27 @@ bool FileLoader::loadFile(char* filename, bool log)
+     if (prepareLoadedData())
+         return true;
+ 
+-    printf("Error loading %s", filename);
+-    mf.close();
++    // Retry lower-priority archives only if the preferred terrain is malformed.
++    printf("Invalid preferred terrain file: %s\n", filename);
+     free();
++    for (ArchiveSet::const_iterator it = gOpenArchives.begin(); it != gOpenArchives.end(); ++it)
++    {
++        uint32 fileNumber;
++        libmpq__off_t length = 0, transferred = 0;
++        if (libmpq__file_number((*it)->mpq_a, filename, &fileNumber) != 0 ||
++            libmpq__file_unpacked_size((*it)->mpq_a, fileNumber, &length) != 0 || length <= 1)
++            continue;
++        data_size = length;
++        data = new uint8[data_size];
++        int result = libmpq__file_read((*it)->mpq_a, fileNumber, data, length, &transferred);
++        if (result == 0 && transferred == length && prepareLoadedData())
++        {
++            printf("Recovered valid terrain from an underlying archive: %s\n", filename);
++            return true;
++        }
++        free();
++    }
++    printf("UNRECOVERABLE terrain file: %s\n", filename);
+     return false;
+ }
+ 

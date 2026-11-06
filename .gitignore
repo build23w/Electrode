@@ -1,0 +1,55 @@
+# Source only. Compiled files and the assembled site live in the build folder
+# (see README "Building"), never here.
+node_modules/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+# never game data
+*.MPQ
+*.mpq
+*.dbc
+*.map
+*.vmtree
+*.vmtile
+*.vmo
+*.mmap
+*.mmtile
+*.sqlite
+# never keys or secrets
+*.pem
+*.key
+.env
+.env.*
+# never private notes, research or build output
+PLAN.md
+GAPS.md
+ARCHITECTURE.md
+PERF.md
+NOTES.md
+SCOPE.md
+evidence/
+screenshots/
+transcripts/
+notes/
+prompts/
+design/
+tools/evidence/
+tools/probes/
+tools/nettest/
+.claude/
+.vscode/
+.idea/
+# development pages: never part of the site
+web/dev/
+web/dev-extract/
+# compiled files and the assembled site
+build/
+dist/
+pages/
+site/
+*.wasm
+*.sqlite.gz
+*.exe
+*.dll
+*.jsonl

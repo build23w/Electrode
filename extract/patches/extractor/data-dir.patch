@@ -1,0 +1,60 @@
+--- a/contrib/extractor/System.cpp
++++ b/contrib/extractor/System.cpp
+@@ -68,8 +68,11 @@
+ map_id* map_ids;
+ uint16* areas;
+ uint16* LiqType;
+-char output_path[128] = ".";
+-char input_path[128] = ".";
++char output_path[1024] = ".";
++char input_path[1024] = ".";
++// LOCAL PATCH (not upstream): -d <Data folder> reads the archives from that folder directly, so
++// the app never has to junction a player's game folder under a folder named Data. Buffers widened.
++char data_path[1024] = "";
+ uint32 maxAreaId = 0;
+ 
+ //**************************************************
+@@ -132,7 +135,8 @@
+     printf(
+         "Usage:\n"\
+         "%s -[var] [value]\n"\
+-        "-i set input path\n"\
++        "-i set input path (the folder holding Data)\n"\
++        "-d set the Data folder directly\n"\
+         "-o set output path\n"\
+         "-e extract only MAP(1)/DBC(2)/Camera(4) - standard: all(7)\n"\
+         "-f height stored as int (less map size but lost some accuracy) 1 by default\n"\
+@@ -156,13 +160,19 @@
+         {
+             case 'i':
+                 if (c + 1 < argc)                           // all ok
+-                    strcpy(input_path, arg[(c++) + 1]);
++                    strncpy(input_path, arg[(c++) + 1], sizeof(input_path) - 1);
++                else
++                    Usage(arg[0]);
++                break;
++            case 'd':                                       // LOCAL PATCH
++                if (c + 1 < argc)
++                    strncpy(data_path, arg[(c++) + 1], sizeof(data_path) - 1);
+                 else
+                     Usage(arg[0]);
+                 break;
+             case 'o':
+                 if (c + 1 < argc)                           // all ok
+-                    strcpy(output_path, arg[(c++) + 1]);
++                    strncpy(output_path, arg[(c++) + 1], sizeof(output_path) - 1);
+                 else
+                     Usage(arg[0]);
+                 break;
+@@ -984,7 +994,10 @@
+     int count = sizeof(CONF_mpq_list) / sizeof(char*);
+     for (int i = 0; i < count; ++i)
+     {
+-        sprintf(filename, "%s/Data/%s", input_path, CONF_mpq_list[i]);
++        if (data_path[0])                               // LOCAL PATCH
++            snprintf(filename, sizeof(filename), "%s/%s", data_path, CONF_mpq_list[i]);
++        else
++            snprintf(filename, sizeof(filename), "%s/Data/%s", input_path, CONF_mpq_list[i]);
+         if (FileExists(filename))
+             new MPQArchive(filename);
+     }

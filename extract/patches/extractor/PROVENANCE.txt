@@ -1,0 +1,15 @@
+CMaNGOS map extractor local build
+Core revision: de8f72993b9e1faa1bf92dd5505f3daec5cea3ce
+Core source: https://github.com/cmangos/mangos-classic
+Base bounds-check patch: https://github.com/thebooradley/wow-classic-singeplayer/blob/main/docker/patches/adt.cpp
+Base patch SHA256: a9cd9f8e186e2cc0c852d52a8e0788510d96fdc883f507f5ecf3ed0d4bd1262e
+Local changes: skip empty liquid headers; recover malformed terrain from underlying archives.
+Built with Debian 12 GCC 12, matching the pinned runtime distribution.
+Only offline extraction changes. Server and browser client pins remain unchanged.
+Rebuild using app/build-extractor.sh; the full reviewed patch is included locally.
+ad SHA256: f0437d7cb11b0fc481a581037df49c85ae991b14125a85321db2f8fc47f89509
+adt-bounds.patch SHA256: 24311ebfbf9c752ad39c36478fefdfe5d00ae3ab859b118f6cf5b79a40aec3ee
+
+Electrode addition (2026-11-01): data-dir.patch / System.cpp — a `-d <Data folder>` flag that opens the
+archives from that folder directly (no junction into the player's folder) and 1024-byte path buffers.
+Same license terms as adt-bounds.patch (see patch-LICENSE).
