@@ -1,0 +1,29 @@
+{
+  "version": "ec836959d8bca994",
+  "files": {
+    "world": {
+      "url": "world.sqlite.gz",
+      "bytes": 127860736,
+      "gzBytes": 40632496,
+      "sha256": "7eae939a03b8fb57d660dce34bda52000e5171d0db9b4811c0c7b3d538fcde3b"
+    },
+    "characters": {
+      "url": "characters.sqlite.gz",
+      "bytes": 10092544,
+      "gzBytes": 18489,
+      "sha256": "f3d7513268ea9a1ef3ada1a5eb6f0126f2b106b36130c43f1f2e05bd5ad86a48"
+    },
+    "realmd": {
+      "url": "realmd.sqlite.gz",
+      "bytes": 1835008,
+      "gzBytes": 10308,
+      "sha256": "d51e9ea13a9d90a6c8d63511efa4a403853c8d2dcbfff3494c55f485be90d242"
+    },
+    "logs": {
+      "url": "logs.sqlite.gz",
+      "bytes": 655360,
+      "gzBytes": 1410,
+      "sha256": "245213919c69036243bfd4fc0a2d3a12647a6cf2267392e4ac14c82b15475f18"
+    }
+  }
+}

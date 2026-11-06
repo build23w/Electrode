@@ -1,0 +1,33 @@
+/* What the browser version adds to the launcher's theme (theme.css): the game in the same page. */
+
+#game { display: none; position: fixed; inset: 0; z-index: 40; background: #000; }
+body.playing { overflow: hidden; }
+body.playing #game { display: block; }
+#benilla { display: block; width: 100vw; height: 100vh; outline: none; }
+
+/* The launcher shown over a running game: the game stays alive underneath. */
+body.playing.show-launcher { overflow: auto; }
+body.playing.show-launcher #game { visibility: hidden; pointer-events: none; }
+
+#chip, .hud > * {
+  font: 12px var(--sans); color: #ddd; background: rgba(0, 0, 0, .55); border: 0; padding: .3rem .6rem;
+}
+#chip { position: fixed; top: 0; left: 0; z-index: 45; color: var(--gold-hi); border-bottom-right-radius: 6px; }
+#chip:empty { display: none; }
+.hud { position: fixed; top: 0; right: 0; z-index: 45; display: flex; }
+.hud > :first-child { border-bottom-left-radius: 6px; }
+.hud button { cursor: pointer; text-decoration: underline; border-radius: 0; box-shadow: none; text-transform: none; letter-spacing: 0; }
+.hud button:hover { color: #fff; }
+.hud button:focus-visible { outline: 2px solid var(--arc); outline-offset: -2px; }
+#saved { color: var(--muted); }
+#saved:empty { display: none; }
+
+#gone { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: #000c; }
+#gone .card { max-width: 460px; margin: 20px; }
+/* The world is between hosts: one line over the game, which stays as it is underneath. */
+#carry {
+  position: fixed; top: 2.2rem; left: 50%; transform: translateX(-50%); z-index: 46; max-width: min(92vw, 720px);
+  font: 13px var(--sans); color: #ddd; background: rgba(0, 0, 0, .72); border: 1px solid var(--gold); border-radius: 6px;
+  padding: .45rem .9rem; pointer-events: none; text-align: center;
+}
+#carry b { color: var(--gold-hi); font-weight: 600; }

@@ -1,0 +1,246 @@
+<!doctype html>
+<!--
+  WoW Electrode in the browser. This page is the desktop app's launcher (its index.html, theme.css
+  and launcher script), with the words changed where a browser tab works differently, and with the
+  game drawn in this same page instead of a window of its own. bridge.js answers the launcher's
+  commands. The sound and shader snippets below come from wenilla's web page (MIT OR Apache-2.0).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WoW Electrode</title>
+<meta name="description" content="WoW Electrode in a browser tab: the 1.12.1 game client and its world server, peer to peer, on your own game files.">
+<link rel="icon" href="assets/crest.png">
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="web.css">
+<script>
+  // Sound: the browser suspends an AudioContext created before the first click or key. Remember
+  // every context the page creates and resume them on the first gesture.
+  (() => {
+    const contexts = [];
+    for (const name of ['AudioContext', 'webkitAudioContext']) {
+      const Orig = window[name];
+      if (!Orig) continue;
+      const Patched = function (...args) { const ctx = new Orig(...args); contexts.push(ctx); return ctx; };
+      Patched.prototype = Orig.prototype;
+      window[name] = Patched;
+    }
+    const resume = () => { for (const ctx of contexts) if (ctx.state !== 'running') ctx.resume().catch(() => {}); };
+    for (const ev of ['pointerdown', 'keydown', 'touchstart']) window.addEventListener(ev, resume, { capture: true, passive: true });
+  })();
+  // Shader compile errors are otherwise invisible: ask for the compilation info and print it.
+  if (navigator.gpu && window.GPUDevice) {
+    const orig = GPUDevice.prototype.createShaderModule;
+    GPUDevice.prototype.createShaderModule = function (desc) {
+      const m = orig.call(this, desc);
+      m.getCompilationInfo().then((info) => {
+        const errs = info.messages.filter((x) => x.type === 'error');
+        if (!errs.length) return;
+        const lines = (desc.code || '').split('\n');
+        for (const e of errs) console.error(`WGSL error in ${desc.label || '(unlabeled)'} @${e.lineNum}:${e.linePos}: ${e.message}\n    ${lines[e.lineNum - 1] || ''}`);
+      });
+      return m;
+    };
+  }
+</script>
+<script type="importmap">{"imports":{"wasi_snapshot_preview1":"./client/wasi_stubs.js"}}</script>
+</head>
+<body>
+<header class="topbar">
+  <img class="crest" src="assets/crest.png" alt="" width="60" height="60">
+  <div class="brand">
+    <h1>WoW Electrode<span class="ver" id="appVersion"></span></h1>
+    <p class="tagline">Electrify WoW</p>
+  </div>
+  <div class="arc" aria-hidden="true"><i></i></div>
+  <span class="pill" id="phase" role="status">idle</span>
+</header>
+
+<div class="layout">
+<aside class="side">
+  <section class="card" aria-labelledby="joinTitle">
+    <b class="title" id="joinTitle">Join a world</b>
+    <p class="sub">Type a string. Everyone on that string plays in the same world, peer to peer. A new string is a room of your own.</p>
+    <input id="string" placeholder="a string, e.g. america, or paste an invite link" aria-label="A string (the name of a world), or an invite link" autocomplete="off" spellcheck="false">
+    <button class="primary enter" id="join">Join</button>
+    <button class="enter" id="play">Play solo</button>
+  </section>
+
+  <section class="card" aria-labelledby="readyTitle">
+    <b class="title" id="readyTitle">Launch readiness</b>
+    <ul class="ready" id="readiness">
+      <li id="readyGpu"><i></i><span>Graphics</span><em>—</em></li>
+      <li id="readyFiles"><i></i><span>Game files</span><em>—</em></li>
+      <li id="readyDb"><i></i><span>Database</span><em>—</em></li>
+      <li id="readyWorld"><i></i><span>World server</span><em>—</em></li>
+      <li id="readyPeers"><i></i><span>Peers</span><em>—</em></li>
+    </ul>
+  </section>
+
+  <div class="side-actions">
+    <button id="pick" class="wide">Choose game folder…</button>
+    <button id="stop">Stop</button>
+    <button id="logs">Open logs</button>
+    <button id="licenses">Licenses</button>
+    <button id="star" class="star" title="Opens the project on GitLab; the Star button is at the top right of the page">★ Star on GitLab</button>
+  </div>
+</aside>
+
+<main class="main">
+<div class="card update-card hidden" id="updateCard" role="status" aria-live="polite">
+  <div class="setup-head"><b class="title" id="updateTitle"></b><span class="k small" id="updateFrom"></span></div>
+  <div class="setup-bar hidden" id="updateBarWrap"><progress id="updateBar" max="100" value="0" aria-label="Downloading the update"></progress><span id="updatePct">0%</span></div>
+  <p class="k small" id="updateText"></p>
+  <div class="dash-actions">
+    <button class="primary hidden" id="updateInstall">Restart and update</button>
+    <button id="updateNotes">What's new</button>
+  </div>
+</div>
+
+<div class="card setup hidden" id="startupProblem" role="alert">
+  <b class="title">The game cannot start in this browser right now</b>
+  <p id="startupText"></p>
+  <p class="k small">Playing solo and joining a string wait until this is solved.</p>
+</div>
+
+<div class="card notice hidden" id="ipNotice">
+  <b class="title">Before you join a string</b>
+  <p>Peers on a string connect to each other directly, browser to browser, so they can see your IP address. Public WebTorrent trackers are used to find each other; they see it too. Connections are encrypted, and a world's game server is never reachable except through them.</p>
+  <p><b>Your game files.</b> WoW Electrode does not include World of Warcraft or its game files: the game runs on your own copy of the 1.12.1 game files. By accepting, you confirm that the game files you use are your own copy, one you own or purchased in the past.</p>
+  <p class="k small">Shown once. Joining a string and playing solo wait until you accept.</p>
+  <button class="primary" id="acceptNotice">I understand and accept</button>
+</div>
+
+<div class="card setup hidden" id="gameFiles">
+  <b class="title">Add your World of Warcraft 1.12.1 game files</b>
+  <p class="k">Choose your own 1.12.1 (build 5875) folder, or its Data folder. The 14 archives are read where they are:
+  nothing is copied, nothing is uploaded, and game files are never shared with peers. Chrome and Edge remember the folder
+  and ask once per visit before reading it again; other browsers ask for the folder each visit.</p>
+  <div class="files-actions">
+    <button class="primary" id="gfUseFolder">Use my WoW folder…</button>
+    <button id="gfArchive" class="hidden">Install Internet Archive</button>
+    <button id="gfFolder" class="hidden">Install from a folder…</button>
+  </div>
+  <div id="gfFound"></div>
+  <div class="drop" id="gfDrop">or drop your WoW folder on this page</div>
+  <div class="install-progress hidden" id="gfProgressWrap">
+    <progress id="gfProgress" max="100" value="0" aria-label="Game files progress" aria-describedby="gfStatus"></progress>
+    <button id="gfCancel">Cancel</button>
+  </div>
+  <div class="k" id="gfStatus" role="status" aria-live="polite"></div>
+</div>
+
+<div class="card notice hidden" id="chooser">
+  <b class="title">More than one world uses this string. Pick one</b>
+  <div id="candidates"></div>
+</div>
+
+<div class="card setup-card hidden" id="setupCard" aria-live="polite">
+  <div class="setup-head"><b class="title" id="setupTitle">Getting your world ready</b><span class="k" id="setupTime"></span></div>
+  <div class="setup-bar"><progress id="setupBar" max="100" value="0" aria-label="Getting the world ready" aria-describedby="setupLabel"></progress><span id="setupPct">0%</span></div>
+  <div id="setupLabel"></div>
+  <div class="k" id="setupNote"></div>
+  <ol class="setup-steps" id="setupSteps"></ol>
+</div>
+
+<nav class="tabs main-tabs" role="tablist" aria-label="Launcher">
+  <button role="tab" id="tabDashboard" aria-controls="paneDashboard" aria-selected="true">Dashboard</button>
+  <button role="tab" id="tabServers" aria-controls="paneServers" aria-selected="false" tabindex="-1">Servers<span class="count" id="serversCount"></span></button>
+  <button role="tab" id="tabMine" aria-controls="paneMine" aria-selected="false" tabindex="-1">My worlds<span class="count" id="mineCount"></span></button>
+  <button role="tab" id="tabAddons" aria-controls="paneAddons" aria-selected="false" tabindex="-1">AddOns<span class="count" id="addonsCount"></span></button>
+</nav>
+
+<section id="paneDashboard" role="tabpanel" aria-labelledby="tabDashboard">
+  <div class="card">
+    <div class="row"><span class="k">World</span><span class="v" id="world">—</span></div>
+    <div class="row"><span class="k">Invite</span><span class="v"><span id="invite">—</span> <button id="copyInvite" class="hidden">copy</button></span></div>
+    <div class="row"><span class="k">Graphics</span><span class="v" id="gpu">—</span></div>
+    <div class="row"><span class="k">Game folder</span><span class="v"><span id="folder">—</span><br><span id="folderStatus" class="k"></span></span></div>
+    <div class="row"><span class="k">Extraction</span><span class="v" id="extraction">—</span></div>
+    <div class="row"><span class="k">Database</span><span class="v" id="database">—</span></div>
+    <div class="row"><span class="k">World server</span><span class="v" id="servers">—</span></div>
+    <div class="row"><span class="k">You</span><span class="v"><code id="peer"></code> · account <code id="account"></code> · level <span id="level">0</span> · <span id="bind"></span> · <span id="peers">0</span> peers</span></div>
+    <div class="row"><span class="k">Players in your world</span><span class="v" id="peersList">—</span></div>
+    <div class="row hidden" id="notifyRow"><span class="k">Notifications</span><span class="v"><button id="notifyToggle" class="toggle" aria-pressed="false">Off</button></span></div>
+    <div class="row"><span class="k">Version</span><span class="v"><span id="version">—</span> <button id="updateCheck" class="hidden">Check for updates</button></span></div>
+  </div>
+  <div class="card">
+    <b class="title">Logs</b>
+    <pre id="log" tabindex="0" aria-label="The log"></pre>
+  </div>
+</section>
+
+<section class="card module hidden" id="paneServers" role="tabpanel" aria-labelledby="tabServers">
+    <div class="list-head"><input id="serverSearch" type="search" maxlength="64" placeholder="Search servers by name or description" aria-label="Search servers"><button id="permRefresh">Refresh</button></div>
+    <div class="k small">Permanent worlds: their names always mean these worlds, and their settings are kept in the WoW Electrode repository. Population comes from the player hosting each one. When nobody is running one, it starts in your browser. Every player in it keeps a copy, and when the player running it leaves, the next one carries it on while everyone stays in the world. The desktop app's players of the same world are a separate group for now.</div>
+    <div class="k small" id="serversNote" role="status"></div>
+    <div id="permanentList"></div>
+    <div class="pager" id="serversPager"></div>
+</section>
+
+<section class="card module hidden" id="paneMine" role="tabpanel" aria-labelledby="tabMine">
+    <div class="k small">The worlds you have played in from this browser. A world run from a browser is kept by every player in it: each browser holds a copy of its characters, and the world carries on from one of them when the player running it leaves.<span class="hidden" id="worldsCount"></span></div>
+    <div id="worlds"></div>
+    <div class="pager" id="worldsPager"></div>
+    <div class="perm-form hidden" id="permForm">
+      <b class="title" id="permTitle">Make this world permanent</b>
+      <p class="k small" id="permText"></p>
+      <div class="list-head"><input id="permDesc" maxlength="280" placeholder="A few words about the world (optional, public)" aria-label="Description"><button class="primary" id="permSend">Open merge request</button><button id="permCancel">Cancel</button></div>
+      <div class="k small" id="permStatus" role="status" aria-live="polite"></div>
+    </div>
+</section>
+
+<section class="card module hidden" id="paneAddons" role="tabpanel" aria-labelledby="tabAddons">
+    <div class="list-head"><input id="addonSearch" type="search" maxlength="64" placeholder="Search addons" aria-label="Search addons"><button id="addonAddFolder">Add folder…</button><button id="addonAddArchive">Add archive…</button></div>
+    <div class="k small">Addons for the game, turned on and off here. The game loads only the ones that are on, the next time it opens or reloads its interface. Your own are kept in this browser; one with the same folder name as an addon that comes with the game replaces it.</div>
+    <div class="addon-terms" id="addonTerms" role="note" aria-labelledby="addonTermsTitle">
+      <b id="addonTermsTitle">Addons and their licenses</b>
+      <p>Addons are made by other people, not by WoW Electrode. Each one comes under its own license or terms, set by its authors, and that covers everything it carries: its code, libraries, art, sounds and data. An addon with no license still belongs to its authors, who keep all rights to it. Addon names and logos belong to their owners.</p>
+      <ul>
+        <li>Before you add an addon, make sure you are allowed to use it, and share or pass it on only if its license allows that.</li>
+        <li>Addons that come with the game are included unmodified, under their authors' terms; their notices are on the <button type="button" class="link" id="addonLicenses">Licenses</button> page.</li>
+        <li>WoW Electrode does not check, change or vouch for the addons you add. An addon can do in the game anything the game's own interface can, so add only addons from sources you trust.</li>
+      </ul>
+      <div class="terms-acts" id="addonTermsActs"><button type="button" class="primary" id="addonAccept">Accept and continue</button><span class="k">Accept to add addons, turn them on or off, and remove them.</span></div>
+    </div>
+    <div class="small k hidden" id="addonTermsDone">You accepted the addon licensing notice on <span id="addonTermsDate"></span>. <button type="button" class="link" id="addonTermsShow">Read it again</button></div>
+    <div class="small k" id="addonsNote" role="status" aria-live="polite"></div>
+    <div id="addonList"></div>
+    <div class="pager" id="addonsPager"></div>
+    <div class="drop" id="addonDrop">or drop an addon folder or a .zip of one on this tab</div>
+    <div class="addons-foot">
+      <button id="addonOpenFolder" class="hidden">Open AddOns folder</button>
+      <button id="addonReload" title="Reloads the game's interface now, so the game loads the addons that are on">Reload game interface</button>
+    </div>
+</section>
+</main>
+</div>
+<div id="cornerVersion" class="corner-version" aria-label="Version"></div>
+
+<!-- Not part of the desktop launcher: folder inputs for browsers without a folder picker, and the game itself. -->
+<input type="file" id="folderInput" webkitdirectory multiple hidden>
+<input type="file" id="addonFolderInput" webkitdirectory multiple hidden>
+<input type="file" id="addonArchiveInput" accept=".zip" hidden>
+
+<div id="game">
+  <canvas id="benilla" tabindex="0"></canvas>
+  <span id="chip"></span>
+  <div class="hud">
+    <span id="saved" title="When your characters were last stored in this browser."></span>
+    <button type="button" id="toLauncher" title="Shows the launcher over the game: addons, servers, the log, Stop. The game keeps running.">launcher</button>
+    <button type="button" id="fs" title="Full screen. Press and hold Esc to leave.">full screen</button>
+  </div>
+  <div id="carry" class="hidden" role="status"><b>The world is moving to another player.</b> You stay in it. <span id="carryText"></span></div>
+  <div id="gone" class="hidden">
+    <div class="card">
+      <b class="title">The world is gone</b>
+      <p id="goneText"></p>
+      <button type="button" id="goneBack" class="primary">Back to the launcher</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="bridge.js"></script>
+</body>
+</html>
